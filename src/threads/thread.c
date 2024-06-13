@@ -8,6 +8,7 @@
 #include "threads/interrupt.h"
 #include "threads/intr-stubs.h"
 #include "threads/palloc.h"
+#include "threads/malloc.h" /* Added to use malloc function */
 #include "threads/switch.h"
 #include "threads/synch.h"
 #include "threads/vaddr.h"
@@ -163,14 +164,14 @@ thread_print_stats (void)
    PRIORITY, but no actual priority scheduling is implemented.
    Priority scheduling is the goal of Problem 1-3. */
 tid_t
-thread_create (const char *name, int priority,
-               thread_func *function, void *aux) 
+thread_create (const char *name, int priority, thread_func *function, void *aux) 
 {
   struct thread *t;
   struct kernel_thread_frame *kf;
   struct switch_entry_frame *ef;
   struct switch_threads_frame *sf;
   tid_t tid;
+  enum intr_level old_level;
 
   ASSERT (function != NULL);
 
@@ -182,6 +183,11 @@ thread_create (const char *name, int priority,
   /* Initialize thread. */
   init_thread (t, name, priority);
   tid = t->tid = allocate_tid ();
+
+  /* Prepare thread for first run by initializing its stack.
+     Do this atomically so intermediate values for the 'stack' 
+     member cannot be observed. */
+  old_level = intr_disable ();
 
   /* Stack frame for kernel_thread(). */
   kf = alloc_frame (t, sizeof *kf);
@@ -197,6 +203,26 @@ thread_create (const char *name, int priority,
   sf = alloc_frame (t, sizeof *sf);
   sf->eip = switch_entry;
   sf->ebp = 0;
+
+  intr_set_level (old_level);
+
+
+  /* Implement file descriptor table */
+  t->file_desc_table = palloc_get_page(0);
+  t->file_desc_count = 2;
+
+  /* Implement process hierarchy */
+  t->parent_thread = thread_current();
+  t->is_load = 0;
+  t->is_exit = 0;
+
+  /* Initialize each semaphore */
+  sema_init(&t->load_sema, 0);
+  sema_init(&t->exit_sema, 0);
+
+  /* Push child into child list. */
+  list_push_back(&t->parent_thread->child_list, &t->child_elem);
+
 
   /* Add to run queue. */
   thread_unblock (t);
@@ -291,6 +317,13 @@ thread_exit (void)
      when it calls thread_schedule_tail(). */
   intr_disable ();
   list_remove (&thread_current()->allelem);
+
+  /* If thread name is main(thus, if this thread is init thread), do not sema up this. */
+  if(strcmp(thread_current()->name, "main")) //If thread is not "main" process, sema up.
+  {
+    sema_up(&thread_current()->exit_sema);
+  }
+
   thread_current ()->status = THREAD_DYING;
   schedule ();
   NOT_REACHED ();
@@ -451,8 +484,6 @@ is_thread (struct thread *t)
 static void
 init_thread (struct thread *t, const char *name, int priority)
 {
-  enum intr_level old_level;
-
   ASSERT (t != NULL);
   ASSERT (PRI_MIN <= priority && priority <= PRI_MAX);
   ASSERT (name != NULL);
@@ -463,10 +494,10 @@ init_thread (struct thread *t, const char *name, int priority)
   t->stack = (uint8_t *) t + PGSIZE;
   t->priority = priority;
   t->magic = THREAD_MAGIC;
-
-  old_level = intr_disable ();
   list_push_back (&all_list, &t->allelem);
-  intr_set_level (old_level);
+
+  /* Initialize child list */
+  list_init(&t->child_list);
 }
 
 /* Allocates a SIZE-byte frame at the top of thread T's stack and
@@ -538,7 +569,7 @@ thread_schedule_tail (struct thread *prev)
   if (prev != NULL && prev->status == THREAD_DYING && prev != initial_thread) 
     {
       ASSERT (prev != cur);
-      palloc_free_page (prev);
+      //palloc_free_page (prev); /* Instructor wants to delete this line. */
     }
 }
 
